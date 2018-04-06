@@ -7,10 +7,10 @@
 #include <DNSServer.h>
 #include <EEPROM.h>
 
-#define           THING_TYPE        "ws"  // Wheater station
-#define           PIN_LS            A0    // Light Sensor (photo resistor) is connected to A0
-#define           PIN_SNR           5     // a DTH22 is connected to GPIO5
-#define           PIN_GRN           4
+#define           PIN_LDR           A0    // Light Sensor (photo resistor) is connected to A0
+#define           PIN_DHT           5     // a DTH22 is connected to GPIO5
+#define           PIN_PIR           13    // PIR sensor
+#define           PIN_LED           4
 
 const char        hostname[]      = "esp8266";
 const byte        DNS_PORT        = 53;
@@ -32,6 +32,7 @@ char              mqtt_topic[32]  = {0};
 char              mqtt_temp[32]   = {0};
 char              mqtt_hum[32]    = {0};
 char              mqtt_lum[32]    = {0};
+char              mqtt_mtn[32]    = {0};
 int               mqtt_syncFreq   = 60;             // how often we have to send MQTT message
 unsigned long     mqtt_lastPost   = 0;
 char              buf[12];
@@ -41,18 +42,21 @@ float             hum             = 0;
 int               minLSValue      = 70;
 int               maxLSValue      = 970;
 float             LSValue         = 0;
+int               state           = 0;
+int               prevState       = 0;
 
 DNSServer         dnsServer;
 ESP8266WebServer  server(80);
 WiFiClient        espClient;
 PubSubClient      mqtt_client(espClient);
-DHT               dht(PIN_SNR, DHT22);
+DHT               dht(PIN_DHT, DHT22);
   
 void setup() {   
-  pinMode(PIN_GRN, OUTPUT);
-  pinMode(PIN_SNR, INPUT);
-  
-  digitalWrite(PIN_GRN, LOW);
+  pinMode(PIN_LED, OUTPUT);
+  pinMode(PIN_DHT, INPUT);
+  pinMode(PIN_PIR, INPUT);
+    
+  digitalWrite(PIN_LED, LOW);
      
   Serial.begin(115200);
   delay(100);
@@ -63,7 +67,7 @@ void setup() {
   if (strlen(wifi_ssid) == 0)
   {
     Serial.println("Start AP mode");
-    digitalWrite(PIN_GRN, HIGH);
+    digitalWrite(PIN_LED, HIGH);
       
     WiFi.softAPConfig(apIP, apIP, netMsk);
     
@@ -84,8 +88,7 @@ void setup() {
   
     mqtt_client.setServer(mqtt_server, mqtt_port);
 
-    sprintf(mqtt_topic, "%s%c%06X", THING_TYPE, '/', ESP.getChipId());
-    Serial.println(mqtt_topic);
+    sprintf(mqtt_topic, "%s%c%06X", ESP.getChipId());
     if (strlen(mqtt_user) != 0) 
     { 
       strcat(mqtt_topic, mqtt_user);
@@ -94,6 +97,7 @@ void setup() {
     sprintf(mqtt_temp, "%s%s", mqtt_topic, "/temperature");
     sprintf(mqtt_hum, "%s%s", mqtt_topic, "/humidity");
     sprintf(mqtt_lum, "%s%s", mqtt_topic, "/luminosity");
+    sprintf(mqtt_mtn, "%s%s", mqtt_topic, "/motion");    
   }
 
   server.on("/", handleRoot);
@@ -123,9 +127,9 @@ void loop() {
         WiFi.begin (wifi_ssid, wifi_pass);
         wifi_lastCon = millis();
       }
-      digitalWrite(PIN_GRN, HIGH);
+      digitalWrite(PIN_LED, HIGH);
       delay(250);
-      digitalWrite(PIN_GRN, LOW);
+      digitalWrite(PIN_LED, LOW);
       delay(250);
       Serial.print(".");
     } 
@@ -133,28 +137,39 @@ void loop() {
     {
       wifi_lastCon = millis();
 
+      if (!mqtt_client.connected()) 
+      { 
+        Serial.println("");
+        Serial.println("Connect MQTT");          
+        if (mqtt_client.connect(ap_ssid)) 
+        {
+          Serial.println("MQTT connected");
+        } 
+        else 
+        {
+          Serial.print("MQTT failed, rc=");
+          Serial.print(mqtt_client.state());    
+        }
+      }
+
+      if (state != prevState)
+      {
+        if (mqtt_client.connected()) 
+        {
+          sprintf(buf, "%d", state);
+          mqtt_client.publish(mqtt_mtn, buf);
+          mqtt_client.loop();
+          prevState = state;
+        }
+      }
+      
       if ((millis() > (mqtt_lastPost + mqtt_syncFreq * 1000)) || (mqtt_lastPost == 0))
       {
-        if (!mqtt_client.connected()) 
-        { 
-          Serial.println("");
-          Serial.println("Connect MQTT");          
-          if (mqtt_client.connect(ap_ssid)) 
-          {
-            Serial.println("MQTT connected");
-          } 
-          else 
-          {
-            Serial.print("MQTT failed, rc=");
-            Serial.print(mqtt_client.state());    
-          }
-        }
-
         if (mqtt_client.connected()) 
         {
           mqtt_lastPost = millis();
                     
-          LSValue = analogRead(PIN_LS);      
+          LSValue = analogRead(PIN_LDR);      
           Serial.print("LSValue: ");
           Serial.println(LSValue);  
               
@@ -186,15 +201,19 @@ void loop() {
             mqtt_client.loop(); 
           }
 
-          digitalWrite(PIN_GRN, HIGH);
+          digitalWrite(PIN_LED, HIGH);
           delay(250);
-          digitalWrite(PIN_GRN, LOW);
+          digitalWrite(PIN_LED, LOW);
           delay(250);
         }
       }
     }
   }
-          
+
+  state = digitalRead(PIN_PIR);
+  delay(10);
+  digitalWrite(PIN_LED, state);
+
   //HTTP
   server.handleClient();
 }
